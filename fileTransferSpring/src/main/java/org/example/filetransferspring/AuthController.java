@@ -1,21 +1,21 @@
 package org.example.filetransferspring;
 
-import exceptions.CustomUsernameNotFoundException;
 import org.example.filetransferspring.dto.AuthRequest;
 import org.example.filetransferspring.dto.AuthResponse;
 import org.example.filetransferspring.dto.UserRegistrationRequest;
+import org.example.filetransferspring.exception.UserAlreadyExistsException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -43,9 +43,7 @@ public class AuthController {
     @PostMapping("/register")
     public ResponseEntity<?> register(@RequestBody UserRegistrationRequest request) {
         if (userRepository.existsByUsername(request.getUsername())) {
-            return ResponseEntity.badRequest().body(Map.of(
-                    "error", "Username is already taken"
-            ));
+            throw new UserAlreadyExistsException("Username '" + request.getUsername() + "' already exists");
         }
 
         User user = new User();
@@ -53,9 +51,9 @@ public class AuthController {
         user.setPassword(passwordEncoder.encode(request.getPassword()));
         userRepository.save(user);
 
-        return ResponseEntity.ok(Map.of(
-                "message", "User registered successfully"
-        ));
+        Map<String, String> response = new HashMap<>();
+        response.put("message", "User registered successfully");
+        return ResponseEntity.ok(response);
     }
 
     @PostMapping("/login")
@@ -63,17 +61,17 @@ public class AuthController {
         try {
             authenticationManager.authenticate(
                     new UsernamePasswordAuthenticationToken(
-                            request.getUsername(),
-                            request.getPassword()
+                            request.username(),
+                            request.password()
                     )
             );
         } catch (BadCredentialsException e) {
-            return ResponseEntity.badRequest().body(Map.of(
-                    "error", "Invalid credentials"
-            ));
+            Map<String, String> error = new HashMap<>();
+            error.put("error", "Invalid username or password");
+            return ResponseEntity.badRequest().body(error);
         }
 
-        final UserDetails userDetails = userDetailsService.loadUserByUsername(request.getUsername());
+        final UserDetails userDetails = userDetailsService.loadUserByUsername(request.username());
         final String jwt = jwtUtil.generateToken(userDetails);
 
         return ResponseEntity.ok(new AuthResponse(jwt));

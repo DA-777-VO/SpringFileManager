@@ -22,6 +22,8 @@ public class SharedFile {
 
     private String shareToken;
 
+    private LocalDateTime createdAt;
+
     public FileEntity getFile() { return file; }
     public void setFile(FileEntity file) { this.file = file; }
 
