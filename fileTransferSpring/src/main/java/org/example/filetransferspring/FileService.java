@@ -1,19 +1,36 @@
 package org.example.filetransferspring;
 
 import exceptions.FileStorageException;
+import exceptions.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import java.io.IOException;
+import java.nio.file.*;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.UUID;
+
 @Service
 public class FileService {
 
     private final Path rootLocation = Paths.get("server-storage");
+    private final FileRepository fileRepository;
+    private final UserRepository userRepository;
+    private final SharedFileRepository sharedFileRepository;
 
-    public FileService() {
+    public FileService(FileRepository fileRepository,
+                       UserRepository userRepository,
+                       SharedFileRepository sharedFileRepository) {
+        this.fileRepository = fileRepository;
+        this.userRepository = userRepository;
+        this.sharedFileRepository = sharedFileRepository;
         init();
     }
 
@@ -27,49 +44,88 @@ public class FileService {
         }
     }
 
-    public void saveFile(MultipartFile file) throws FileStorageException, FileAlreadyExistsException {
-        try {
-            String filename = file.getOriginalFilename();
-            Path destination = rootLocation.resolve(filename)
-                    .normalize()
-                    .toAbsolutePath();
+    public void saveFile(MultipartFile file, String username)
+            throws IOException, FileAlreadyExistsException {
 
-            // Проверка существования файла
-//            if (Files.exists(destination)) {
-//                throw new FileAlreadyExistsException("Файл с именем '" + filename + "' уже существует");
-//            }
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
 
-            // Проверка безопасности пути
-            if (!destination.getParent().equals(rootLocation.toAbsolutePath())) {
-                throw new FileStorageException("Недопустимый путь к файлу");
-            }
+        String filename = file.getOriginalFilename();
+        Path userDir = rootLocation.resolve(username);
 
-            // Сохраняем без перезаписи
-            Files.copy(file.getInputStream(), destination);
-
-        } catch (FileAlreadyExistsException ex) {
-            throw ex; // Пробрасываем специальное исключение
-        } catch (IOException ex) {
-            throw new FileStorageException("Не удалось сохранить файл: " + ex.getMessage());
+        if (!Files.exists(userDir)) {
+            Files.createDirectory(userDir);
         }
-    }
 
-    public boolean fileExists(String filename) {
-        try {
-            return Files.exists(rootLocation.resolve(filename));
-        } catch (InvalidPathException ex) {
-            return false;
+        Path destination = userDir.resolve(filename).normalize().toAbsolutePath();
+
+        if (fileRepository.existsByFilenameAndOwner(filename, user)) {
+            throw new FileAlreadyExistsException("File already exists");
         }
+
+        Files.copy(file.getInputStream(), destination, StandardCopyOption.REPLACE_EXISTING);
+
+        FileEntity fileEntity = new FileEntity();
+        fileEntity.setFilename(filename);
+        fileEntity.setFilePath(destination.toString());
+        fileEntity.setOwner(user);
+        fileEntity.setUploadDate(LocalDateTime.now());
+        fileRepository.save(fileEntity);
     }
 
-    public boolean deleteFile(String filename) throws IOException {
-        return Files.deleteIfExists(rootLocation.resolve(filename));
+    public boolean fileExists(String filename, String username) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+        return fileRepository.existsByFilenameAndOwner(filename, user);
     }
 
-    public List<String> listAllFiles() throws IOException {
-        return Files.walk(rootLocation, 1)
-                .filter(path -> !path.equals(rootLocation))
-                .map(path -> path.getFileName().toString())
-                .collect(Collectors.toList());
+    public void deleteFile(String filename, String username) throws IOException {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+
+        FileEntity fileEntity = fileRepository.findByFilenameAndOwner(filename, user)
+                .orElseThrow(() -> new FileNotFoundException("File not found"));
+
+        Files.deleteIfExists(Paths.get(fileEntity.getFilePath()));
+        fileRepository.delete(fileEntity);
+    }
+
+    public List<FileEntity> listUserFiles(String username) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+        return fileRepository.findByOwner(user);
+    }
+
+    public FileEntity getFileByNameAndUser(String filename, String username) throws FileNotFoundException {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+        return fileRepository.findByFilenameAndOwner(filename, user)
+                .orElseThrow(() -> new FileNotFoundException("File not found"));
+    }
+
+    public String generateShareToken(String filename, String ownerUsername) throws FileNotFoundException {
+        User owner = userRepository.findByUsername(ownerUsername)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+
+        FileEntity file = fileRepository.findByFilenameAndOwner(filename, owner)
+                .orElseThrow(() -> new FileNotFoundException("File not found"));
+
+        String token = UUID.randomUUID().toString();
+
+        SharedFile sharedFile = new SharedFile();
+        sharedFile.setFile(file);
+        sharedFile.setShareToken(token);
+        sharedFile.setCreatedAt(LocalDateTime.now());
+        sharedFileRepository.save(sharedFile);
+
+        return token;
+    }
+
+    public FileEntity getFileByShareToken(String token) throws FileNotFoundException {
+        SharedFile sharedFile = sharedFileRepository.findByShareToken(token)
+                .orElseThrow(() -> new FileNotFoundException("Invalid token"));
+
+        // Здесь можно добавить проверку срока действия токена
+        return sharedFile.getFile();
     }
 }

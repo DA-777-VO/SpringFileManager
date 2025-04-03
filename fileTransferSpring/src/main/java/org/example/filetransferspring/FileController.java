@@ -11,6 +11,8 @@ import java.io.IOException;
 import org.springframework.http.ResponseEntity;
 import exceptions.FileAlreadyExistsException;
 import exceptions.FileStorageException;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.http.HttpStatus;
@@ -35,26 +37,27 @@ public class FileController {
     }
 
     @PostMapping("/upload")
-    public ResponseEntity<?> uploadFile(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<?> uploadFile(
+            @RequestParam("file") MultipartFile file,
+            @AuthenticationPrincipal UserDetails userDetails) {
+
         try {
             if (file.isEmpty()) {
                 return ResponseEntity.badRequest().body("Файл пустой");
             }
 
             String filename = file.getOriginalFilename();
-            if (fileService.fileExists(filename)) {
-                return ResponseEntity.status(HttpStatus.CONFLICT)
+            if (fileService.fileExists(filename, userDetails.getUsername())) {
+                return ResponseEntity.status(409)
                         .body("Файл с именем '" + filename + "' уже существует");
             }
 
-
-            fileService.saveFile(file);
+            fileService.saveFile(file, userDetails.getUsername());
             return ResponseEntity.ok("Файл успешно загружен");
 
         } catch (FileAlreadyExistsException ex) {
-            return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(ex.getMessage());
-        } catch (FileStorageException ex) {
+            return ResponseEntity.status(409).body(ex.getMessage());
+        } catch (FileStorageException | IOException ex) {
             return ResponseEntity.badRequest().body(ex.getMessage());
         } catch (Exception ex) {
             return ResponseEntity.internalServerError()
@@ -63,22 +66,27 @@ public class FileController {
     }
 
     @GetMapping
-    public ResponseEntity<?> listFiles() {
+    public ResponseEntity<?> listFiles(@AuthenticationPrincipal UserDetails userDetails) {
         try {
-            return ResponseEntity.ok(fileService.listAllFiles());
+            return ResponseEntity.ok(fileService.listUserFiles(userDetails.getUsername()));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body("Error: " + e.getMessage());
         }
     }
 
     @GetMapping("/download/{filename}")
-    public ResponseEntity<Resource> downloadFile(@PathVariable String filename) throws IOException {
-        Path filePath = Paths.get("server-storage").resolve(filename).normalize();
+    public ResponseEntity<Resource> downloadFile(
+            @PathVariable String filename,
+            @AuthenticationPrincipal UserDetails userDetails) throws IOException {
+
+        FileEntity fileEntity = fileService.getFileByNameAndUser(filename, userDetails.getUsername());
+        Path filePath = Paths.get(fileEntity.getFilePath());
         Resource resource = new UrlResource(filePath.toUri());
 
         if (resource.exists()) {
             return ResponseEntity.ok()
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + resource.getFilename() + "\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "inline; filename=\"" + resource.getFilename() + "\"")
                     .contentType(MediaType.parseMediaType(Files.probeContentType(filePath)))
                     .body(resource);
         } else {
@@ -87,30 +95,72 @@ public class FileController {
     }
 
     @GetMapping("/metadata/{filename}")
-    public ResponseEntity<Map<String, Object>> getFileMetadata(@PathVariable String filename) {
+    public ResponseEntity<Map<String, Object>> getFileMetadata(
+            @PathVariable String filename,
+            @AuthenticationPrincipal UserDetails userDetails) {
+
         try {
-            Path filePath = Paths.get("server-storage").resolve(filename);
-            BasicFileAttributes attrs = Files.readAttributes(filePath, BasicFileAttributes.class);
+            FileEntity fileEntity = fileService.getFileByNameAndUser(filename, userDetails.getUsername());
+            Path filePath = Paths.get(fileEntity.getFilePath());
 
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("size", Files.size(filePath));
-            metadata.put("uploadDate", attrs.creationTime().toMillis());
+            metadata.put("uploadDate", fileEntity.getUploadDate());
+            metadata.put("owner", fileEntity.getOwner().getUsername());
 
             return ResponseEntity.ok(metadata);
-        } catch (IOException e) {
+        } catch (Exception e) {
             return ResponseEntity.notFound().build();
         }
     }
 
     @DeleteMapping("/{filename}")
-    public ResponseEntity<?> deleteFile(@PathVariable String filename) {
+    public ResponseEntity<?> deleteFile(
+            @PathVariable String filename,
+            @AuthenticationPrincipal UserDetails userDetails) {
+
         try {
-            if (fileService.deleteFile(filename)) {
-                return ResponseEntity.ok("File deleted");
-            }
-            return ResponseEntity.notFound().build();
+            fileService.deleteFile(filename, userDetails.getUsername());
+            return ResponseEntity.ok("File deleted");
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body("Error: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/share/{filename}")
+    public ResponseEntity<?> shareFile(
+            @PathVariable String filename,
+            @AuthenticationPrincipal UserDetails userDetails) {
+
+        try {
+            String shareToken = fileService.generateShareToken(filename, userDetails.getUsername());
+            return ResponseEntity.ok().body(Map.of(
+                    "shareUrl", "/api/files/shared/" + shareToken,
+                    "token", shareToken
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body("Error sharing file: " + e.getMessage());
+        }
+    }
+
+    @GetMapping("/shared/{token}")
+    public ResponseEntity<Resource> downloadSharedFile(@PathVariable String token) {
+        try {
+            FileEntity fileEntity = fileService.getFileByShareToken(token);
+            Path filePath = Paths.get(fileEntity.getFilePath());
+            Resource resource = new UrlResource(filePath.toUri());
+
+            if (resource.exists()) {
+                return ResponseEntity.ok()
+                        .header(HttpHeaders.CONTENT_DISPOSITION,
+                                "inline; filename=\"" + resource.getFilename() + "\"")
+                        .contentType(MediaType.parseMediaType(Files.probeContentType(filePath)))
+                        .body(resource);
+            } else {
+                return ResponseEntity.notFound().build();
+            }
+        } catch (Exception e) {
+            return ResponseEntity.status(403).body(null);
         }
     }
 }
